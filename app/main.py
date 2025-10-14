@@ -20,6 +20,8 @@ except ImportError as e:
     OCR_AVAILABLE = False
     ocr_service = None
 
+
+
 # Create FastAPI app
 app = FastAPI(
     title="Smart Expense Tracker API",
