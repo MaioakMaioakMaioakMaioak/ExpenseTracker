@@ -12,7 +12,16 @@ class OCRService:
         try:
             # Load Thai + English reader
             self.reader = easyocr.Reader(['th', 'en'], gpu=False, verbose=False)
-            print("✅ OCR model loaded successfully! 🔥")
+            print("✅ OCR model loaded successfully!")
+            
+            # Import parser
+            try:
+                from app.services.enhanced_parser import receipt_parser
+                self.parser = receipt_parser
+                print("✅ Receipt parser loaded!")
+            except ImportError:
+                print("⚠️ Receipt parser not found, using basic parsing")
+                self.parser = None
         except Exception as e:
             print(f"❌ Failed to load OCR model: {e}")
             raise
@@ -46,18 +55,15 @@ class OCRService:
             
             # 3. Parse the text
             parsed_data = self._parse_receipt_text(results)
-            parsed = self._parse_receipt_text(results)
-            transaction_type = self._classify_transaction_type(parsed['raw_text'])
             
             return {
                 'success': True,
-                'amount': parsed['amount'],
-                'bank': parsed['bank'],
-                'date': parsed['date'],
-                'raw_text': parsed['raw_text'],
-                'all_numbers': parsed['all_numbers'],
-                'confidence': parsed['confidence'],
-                'transaction_type': transaction_type
+                'amount': parsed_data['amount'],
+                'bank': parsed_data['bank'],
+                'date': parsed_data['date'],
+                'raw_text': parsed_data['raw_text'],
+                'all_numbers': parsed_data['all_numbers'],
+                'confidence': parsed_data['confidence']
             }
         except Exception as e:
             import traceback
@@ -140,21 +146,27 @@ class OCRService:
         
         # Patterns to look for
         patterns = [
-            r'(?:จำนวน|ยอดสุทธิ|ยอด|Total|Amount)\s*[:\-]?\s*([0-9,]+\.\d{2})',
-            r'([0-9,]+\.\d{2})\s*(?:บาท|฿|thb)',
-            r'\b([0-9]+\.\d{2})\b'
+            # Pattern 1: After keywords
+            r'(?:จำนวน|ยอด|Amount|Total|THB|฿|บาท)\s*:?\s*([0-9]+\.?[0-9]{0,2})',
+            # Pattern 2: Number with THB or ฿
+            r'([0-9]+\.?[0-9]{0,2})\s*(?:THB|฿|บาท)',
+            # Pattern 3: Number with 2 decimal places
+            r'\b([0-9]+\.[0-9]{2})\b',
+            # Pattern 4: Large numbers
+            r'\b([0-9]{2,}\.?[0-9]{0,2})\b'
         ]
-        text = text.replace(',', '')
         
         for pattern in patterns:
-            matches = re.findall(pattern, text)
+            matches = re.findall(pattern, text_cleaned, re.IGNORECASE)
             if matches:
-                try:
-                    amount = float(matches[0])
-                    if amount > 0:
-                        return amount
-                except:
-                    continue
+                for match in matches:
+                    try:
+                        amount = float(match)
+                        # Sanity check (1-1000000 baht)
+                        if 1 <= amount <= 1000000:
+                            return amount
+                    except:
+                        continue
         
         return None
     
@@ -179,20 +191,6 @@ class OCRService:
                     return bank_code
         
         return 'unknown'
-    
-    def _classify_transaction_type(self, text: str) -> str:
-        text = text.lower()
-        categories = {
-            "เติมเงิน": ["เติมเงิน", "เติม", "top-up", "เติมทรู", "เติมวอลเล็ต"],
-            "ชำระเงิน": ["ชำระเงิน", "ชำระ", "จ่ายสินค้า", "payment", "จ่าย"],
-            "จ่ายบิล": ["บิล", "ค่าน้ำ", "ค่าไฟ", "ค่าโทรศัพท์", "ค่าผ่อน", "bill"],
-            "โอนเงิน": ["โอนเงิน", "โอน", "transfer", "บัญชีปลายทาง"],
-        }
-        for cat, kws in categories.items():
-            for kw in kws:
-                if kw in text:
-                    return cat
-        return "unknown"
     
     def _extract_date(self, text: str) -> Optional[str]:
         """
