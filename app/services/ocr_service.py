@@ -111,23 +111,23 @@ class OCRService:
         """
         # Combine all text
         all_text = ' '.join([text[1] for text in ocr_results])
-        
+
         # Get confidence scores
         confidences = [text[2] for text in ocr_results]
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0
-        
+
+        # Find all numbers (for debugging & fallback)
+        all_numbers = re.findall(r'\d+[,.]?\d*', all_text)
+
         # Extract amount
         amount = self._extract_amount(all_text)
-        
+
         # Detect bank
         bank = self._detect_bank(all_text)
-        
-        # Extract date
-        date = self._extract_date(all_text)
-        
-        # Find all numbers (for debugging)
-        all_numbers = re.findall(r'\d+[,.]?\d*', all_text)
-        
+
+        # Extract date (pass all_numbers as fallback)
+        date = self._extract_date(all_text, all_numbers)
+
         return {
             'amount': amount,
             'bank': bank,
@@ -141,33 +141,39 @@ class OCRService:
         """
         Extract monetary amount from text
         """
-        # Clean text
-        text_cleaned = text.replace(',', '').replace(' ', '')
+        # Normalize common OCR mistakes
+
+        cleaned = (
+            text.replace(',', '')
+                .replace(' ', '')
+                .replace('O', '0')
+                .replace('o', '0')
+                .replace('l', '1')
+                .replace('I', '1')
+                .replace('|', '1')
+                .replace('฿', '')
+                .replace('B', '')
+        )
         
-        # Patterns to look for
+        # Patterns to detect amount (more flexible)
         patterns = [
-            # Pattern 1: After keywords
-            r'(?:จำนวน|ยอด|Amount|Total|THB|฿|บาท)\s*:?\s*([0-9]+\.?[0-9]{0,2})',
-            # Pattern 2: Number with THB or ฿
-            r'([0-9]+\.?[0-9]{0,2})\s*(?:THB|฿|บาท)',
-            # Pattern 3: Number with 2 decimal places
+            r'(?:จำนวน|ยอด|Amount|Total|รวม|โอน)\s*:?\s*([0-9]+\.?[0-9]{0,2})',
+            r'([0-9]+\.?[0-9]{0,2})\s*(?:บาท|THB|฿)',
             r'\b([0-9]+\.[0-9]{2})\b',
-            # Pattern 4: Large numbers
-            r'\b([0-9]{2,}\.?[0-9]{0,2})\b'
+            r'\b([0-9]{2,6})\b'
         ]
-        
+
         for pattern in patterns:
-            matches = re.findall(pattern, text_cleaned, re.IGNORECASE)
+            matches = re.findall(pattern, cleaned)
             if matches:
-                for match in matches:
+                for m in matches:
                     try:
-                        amount = float(match)
-                        # Sanity check (1-1000000 baht)
-                        if 1 <= amount <= 1000000:
+                        amount = float(m)
+                        # sanity check (amount between 1 and 1,000,000)
+                        if 1 <= amount <= 1_000_000:
                             return amount
-                    except:
+                    except ValueError:
                         continue
-        
         return None
     
     def _detect_bank(self, text: str) -> str:
@@ -192,22 +198,50 @@ class OCRService:
         
         return 'unknown'
     
-    def _extract_date(self, text: str) -> Optional[str]:
+    def _extract_date(self, text: str, all_numbers: Optional[list] = None) -> Optional[str]:
         """
-        Extract date from text
+        Extract date and time from OCR text or all_numbers fallback
         """
-        # Pattern: DD/MM/YYYY or DD-MM-YYYY
-        date_patterns = [
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-            r'(\d{1,2}\s+[ม|ก|มิ|เม|พ|มี|ธ|ส|ต|ป]\.?\s*[ค|พ]\.?\s*\d{4})',
+        # แผนที่เดือนภาษาไทยเป็นตัวเลข
+        thai_months = [
+            'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+            'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
         ]
-        
-        for pattern in date_patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1)
-        
+
+        # 1) ลองหาวันที่จาก text โดยตรง
+        date_pattern = r'(\d{1,2})\s*(ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)\s*(\d{2,4})'
+        match = re.search(date_pattern, text)
+        if match:
+            day, month, year = match.groups()
+            if len(year) == 4:
+                year = year[-2:]  # เหลือแค่สองหลัก เช่น 2568 -> 68
+
+            # ลองหาด้วยว่าในข้อความมีเวลาไหม
+            time_match = re.search(r'(\d{1,2}):(\d{2})', text)
+            if time_match:
+                hour, minute = time_match.groups()
+                return f"{int(day)} {month} {year} {hour}:{minute}"
+            else:
+                return f"{int(day)} {month} {year}"
+
+        # fallback ถ้า OCR อ่านไม่ครบ ใช้ all_numbers ช่วย
+        if all_numbers and len(all_numbers) >= 4:
+            try:
+                day = int(all_numbers[0])
+                year = int(all_numbers[1]) % 100  # ตัดเหลือ 2 หลัก เช่น 68
+                hour = all_numbers[2]
+                minute = all_numbers[3]
+
+                # หาเดือนจาก text
+                month_match = re.search(r'(ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)', text)
+                month = month_match.group(1) if month_match else 'ม.ค.'
+
+                return f"{day} {month} {year} {hour}:{minute}"
+            except:
+                pass
+
         return None
+
 
 # Create singleton instance
 print("📦 Initializing OCR Service...")
